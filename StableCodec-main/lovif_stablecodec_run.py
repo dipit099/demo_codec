@@ -446,6 +446,7 @@ Other description: StableCodec (ft24.pkl) with SD-Turbo generative prior, LoRA-a
 
     zip_path = Path(args.out_dir) / "submission.zip"
     if zip_path.exists():
+        
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(sub_rec.glob("*.png")):
