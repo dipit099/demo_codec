@@ -89,6 +89,19 @@ def parse_args():
     p.add_argument("--min_free_gb", type=float, default=2.0,
                    help="Stop gracefully + clean up if free disk drops below this.")
 
+    # ── L1: encoder-side latent optimization (perceptual RDO, test-legal) ──
+    p.add_argument("--latent_opt", action="store_true",
+                   help="Optimize the transmitted latent per image to minimize "
+                        "LPIPS+DISTS to the source (frozen model, decoder unchanged).")
+    p.add_argument("--lo_iters", type=int, default=40)
+    p.add_argument("--lo_lr", type=float, default=5e-3)
+    p.add_argument("--lo_lambda_dists", type=float, default=1.0)
+    p.add_argument("--lo_lambda_rate", type=float, default=10.0,
+                   help="Penalty for exceeding the y0 bitrate (0=unconstrained).")
+    p.add_argument("--lo_max_pixels", type=int, default=1_200_000,
+                   help="Skip latent_opt (fall back to plain compress) above this "
+                        "pixel count to avoid OOM from full-res backprop.")
+
     # ── E2a: blind decoder-side refinement (test-phase legal, no GT) ──
     p.add_argument("--postproc", type=str, default="none",
                    choices=["none", "sdturbo"],
@@ -230,6 +243,29 @@ def run_compression(args, all_images):
     net.cuda().eval()
     net.codec.update(force=True)
 
+    # ── L1: optional encoder-side latent optimizer setup ──
+    lo_lpips = lo_dists = None
+    if getattr(args, "latent_opt", False):
+        import lpips as _lpips_pkg
+        import DISTS_pytorch
+        from DISTS_pytorch import DISTS as _DISTS
+        log("Setting up L1 latent optimization (LPIPS+DISTS loss, frozen model)...")
+        lo_lpips = _lpips_pkg.LPIPS(net="alex", verbose=False).cuda().eval()
+        _ds = _DISTS(load_weights=False)
+        _wp = os.path.join(os.path.dirname(DISTS_pytorch.__file__), "weights.pt")
+        _w = torch.load(_wp, map_location="cpu")
+        _ds.alpha.data, _ds.beta.data = _w["alpha"], _w["beta"]
+        lo_dists = _ds.cuda().eval()
+        for _m in (lo_lpips, lo_dists):
+            for _p in _m.parameters():
+                _p.requires_grad_(False)
+        try:
+            net.unet.enable_gradient_checkpointing()
+            net.vae.enable_gradient_checkpointing()
+            log("  gradient checkpointing enabled on unet+vae")
+        except Exception as _e:
+            log(f"  (gradient checkpointing not enabled: {_e})")
+
     # ── E2a: optional blind refiner (test-phase legal; uses no GT) ──
     refiner = None
     if getattr(args, "postproc", "none") != "none":
@@ -275,10 +311,28 @@ def run_compression(args, all_images):
         pad_w = (math.ceil(ori_w / 256)) * 256 - ori_w
         img_padded = F.pad(img, pad=(0, pad_w, 0, pad_h), mode="reflect")
 
-        with torch.no_grad():
-            try:
-                # compress
-                output_dict = net.compress(img_padded)
+        # L1: decide whether to optimize the latent for this image (memory cap).
+        use_lo = (lo_lpips is not None) and (ori_h * ori_w <= args.lo_max_pixels)
+        if (lo_lpips is not None) and not use_lo:
+            log(f"  [L1] skipped (pixels {ori_h*ori_w} > cap {args.lo_max_pixels}) "
+                f"-> plain compress")
+
+        try:
+            if use_lo:
+                from latent_opt import optimize_latent
+                y_opt = optimize_latent(
+                    net, img_padded, net.pos_caption_enc, lo_lpips, lo_dists,
+                    iters=args.lo_iters, lr=args.lo_lr,
+                    lambda_dists=args.lo_lambda_dists,
+                    lambda_rate=args.lo_lambda_rate,
+                    ori_h=img_padded.shape[2], ori_w=img_padded.shape[3], log=log)
+                with torch.no_grad():
+                    output_dict = net.codec.compress_from_y(y_opt)
+            else:
+                with torch.no_grad():
+                    output_dict = net.compress(img_padded)
+
+            with torch.no_grad():
                 shape = output_dict["shape"]
                 bin_file = bin_dir / f"{fname}.bin"
                 with bin_file.open("wb") as f:
@@ -292,12 +346,12 @@ def run_compression(args, all_images):
                 out_img = net.decompress(strings, shape2, pos_tag_prompt)
                 out_img = out_img[:, :, :ori_h, :ori_w]
                 out_img = (out_img * 0.5 + 0.5).float().cpu().detach()
-            except RuntimeError as e:
-                if "out of memory" in str(e):
-                    log(f"  CUDA OOM on {img_path.name}, skipping")
-                    torch.cuda.empty_cache()
-                    continue
-                raise
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                log(f"  CUDA OOM on {img_path.name}, skipping")
+                torch.cuda.empty_cache()
+                continue
+            raise
 
         output_pil = transforms.ToPILImage()(out_img[0].clamp(0.0, 1.0))
 

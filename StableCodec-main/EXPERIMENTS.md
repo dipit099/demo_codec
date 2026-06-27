@@ -90,6 +90,21 @@ across images was already tried and reached **Final ≈ 66.9** (up from ~65.9).
 **Do not rebuild this.** We need a lever that is different from both rate
 allocation and blind refinement.
 
+### L2/L3 decoder knobs — ❌ ALL REJECTED
+Worst-15, vs baseline: `res_scale` 0.7→−0.02, 1.15→−0.15, 1.3→−0.38 (monotone
+worse away from 1.0); tiling `latent128/ovlp48`→−0.09, `+vae224`→−0.11 (DISTS
+worse, one OOM). **Five experiments now agree: the frozen decoder is at its
+trained optimum; any decode-time perturbation moves away from GT.** Decoder-side
+is exhausted → only encoder-side (L1) remains.
+
+### L1 — encoder-side latent optimization — 🔨 BUILT, awaiting validation
+`src/latent_opt.py` + `--latent_opt`. Freezes the model, Adam-optimizes the
+transmitted latent `y` to minimize `LPIPS + λ·DISTS` to the source through the
+frozen differentiable decoder, with a rate penalty pinned to the y0 bitrate.
+`compress_from_y` entropy-codes the result; the decoder is untouched. Pixel cap
+(`--lo_max_pixels`, default 1.2M) skips huge images (full-res backprop OOMs T4);
+gradient checkpointing on. **Validate on small images first.**
+
 ## 3c. Remaining test-safe levers that move *toward* GT (next)
 To improve reference metrics we must make the decode closer to *this* GT, not a
 different plausible image. With refinement (away from GT) and ensemble (fixed
