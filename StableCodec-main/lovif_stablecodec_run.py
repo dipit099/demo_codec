@@ -29,7 +29,7 @@ from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
 
 # ─────────────────────────── defaults ───────────────────────────
-KAGGLE_CKPT_DIR = "/kaggle/input/datasets/tonyironman099/lovif-c-stablecodec-models/Archive"
+KAGGLE_CKPT_DIR = "/kaggle/input/datasets/mehedi052/stablecodec-checkpoints"
 KAGGLE_VAL_DIR = "/kaggle/input/datasets/tonyironman099/lovif-2026-image-compression/dataset_val"
 KAGGLE_WORK = "/kaggle/working"
 
@@ -48,7 +48,7 @@ def parse_args():
     p.add_argument("--val_dir", type=str, default=None,
                    help="Ground-truth validation images folder")
     p.add_argument("--codec_path", type=str, default=None,
-                   help="Path to stablecodec_ft24.pkl")
+                   help="Path to stablecodec_ft16.pkl")
     p.add_argument("--elic_path", type=str, default=None,
                    help="Path to elic_official.pth")
     p.add_argument("--sd_path", type=str, default=None,
@@ -95,9 +95,9 @@ def resolve_paths(args):
 
     if args.codec_path is None:
         if is_kaggle:
-            args.codec_path = os.path.join(KAGGLE_CKPT_DIR, "stablecodec_ft24.pkl")
+            args.codec_path = os.path.join(KAGGLE_CKPT_DIR, "stablecodec_ft16.pkl")
         else:
-            args.codec_path = str(Path(__file__).resolve().parent.parent / "stablecodec_ft24.pkl")
+            args.codec_path = str(Path(__file__).resolve().parent.parent / "stablecodec_ft16.pkl")
 
     if args.elic_path is None:
         if is_kaggle:
