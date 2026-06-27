@@ -36,6 +36,11 @@ KAGGLE_WORK = "/kaggle/working"
 BPP_BUDGET = 0.008
 DEFAULT_SEED = 123
 
+# 15 worst images by perceptual score contribution (20*LPIPS + 25*DISTS) on the
+# ft24 baseline. Used by --worst_set for fast experiment iteration.
+WORST15 = ["0054", "0073", "0017", "0062", "0022", "0052", "0089", "0090",
+           "0014", "0068", "0020", "0011", "0038", "0045", "0003"]
+
 
 # ─────────────────────────── arg parser ─────────────────────────
 def parse_args():
@@ -69,6 +74,32 @@ def parse_args():
     p.add_argument("--skip_zip", action="store_true",
                    help="Skip submission ZIP creation")
 
+    # ── experiment harness ──
+    p.add_argument("--worst_set", action="store_true",
+                   help="Run only on the 15 worst (perceptually) baseline images; "
+                        "prints per-image deltas vs baselines/worst15_ft24.json")
+    p.add_argument("--checkpoint", type=str, default=None,
+                   help="Checkpoint filename in the Kaggle ckpt dir, e.g. "
+                        "'stablecodec_ft16.pkl'. Overrides --codec_path resolution.")
+    p.add_argument("--tag", type=str, default=None,
+                   help="Label for this experiment (used in logs/output subdir).")
+    p.add_argument("--zip_only", action="store_true",
+                   help="After zipping, delete loose reconstructed/ + bitstream/ "
+                        "dirs to save Kaggle disk (keeps only submission.zip).")
+    p.add_argument("--min_free_gb", type=float, default=2.0,
+                   help="Stop gracefully + clean up if free disk drops below this.")
+
+    # ── E2a: blind decoder-side refinement (test-phase legal, no GT) ──
+    p.add_argument("--postproc", type=str, default="none",
+                   choices=["none", "sdturbo"],
+                   help="Blind RGB refinement backend applied after decompress.")
+    p.add_argument("--postproc_strength", type=float, default=0.3,
+                   help="SDEdit denoising strength in (0,1]. Low=gentle.")
+    p.add_argument("--postproc_steps", type=int, default=2,
+                   help="Effective SD-Turbo denoise steps for refinement (1-4).")
+    p.add_argument("--postproc_prompt", type=str, default=None,
+                   help="Positive prompt for the refiner (None=backend default).")
+
     # StableCodec model params (match defaults in testing_utils.py)
     p.add_argument("--lora_rank_unet", type=int, default=32)
     p.add_argument("--lora_rank_vae", type=int, default=16)
@@ -92,6 +123,11 @@ def resolve_paths(args):
             args.val_dir = KAGGLE_VAL_DIR
         else:
             args.val_dir = str(Path(__file__).resolve().parent.parent.parent.parent / "dataset_val")
+
+    # --checkpoint <filename> overrides codec_path, resolved in the ckpt dir.
+    if args.checkpoint is not None and args.codec_path is None:
+        ckpt_dir = KAGGLE_CKPT_DIR if is_kaggle else str(Path(__file__).resolve().parent.parent)
+        args.codec_path = os.path.join(ckpt_dir, args.checkpoint)
 
     if args.codec_path is None:
         if is_kaggle:
@@ -135,6 +171,15 @@ def log(msg):
 def count_pixels(path):
     with Image.open(path) as img:
         return img.size[0] * img.size[1]
+
+
+def free_gb(path):
+    """Free disk space in GB at the filesystem holding `path`."""
+    try:
+        total, used, free = shutil.disk_usage(str(path))
+        return free / (1024 ** 3)
+    except Exception:
+        return 999.0
 
 
 # ─────────────── PHASE 1: compress + decompress ────────────────
@@ -181,6 +226,15 @@ def run_compression(args, all_images):
     net.cuda().eval()
     net.codec.update(force=True)
 
+    # ── E2a: optional blind refiner (test-phase legal; uses no GT) ──
+    refiner = None
+    if getattr(args, "postproc", "none") != "none":
+        from postprocess import build_refiner
+        log(f"Building blind refiner: {args.postproc} "
+            f"(strength={args.postproc_strength}, steps={args.postproc_steps})")
+        refiner = build_refiner(args.postproc, sd_path, device="cuda",
+                                prompt=args.postproc_prompt)
+
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
@@ -198,7 +252,16 @@ def run_compression(args, all_images):
 
     for i, img_path in enumerate(all_images, 1):
         fname = img_path.stem
-        log(f"[{i:03d}/{n}] Processing {img_path.name}")
+
+        # Kaggle disk safety: stop gracefully if we are about to fill the disk.
+        fg = free_gb(args.out_dir)
+        if fg < args.min_free_gb:
+            log(f"\n[DISK] free={fg:.2f}GB < min_free_gb={args.min_free_gb}GB -> "
+                f"stopping after {i-1} images to avoid a crash. "
+                f"Partial results are kept; re-run to resume on a fresh disk.")
+            break
+
+        log(f"[{i:03d}/{n}] Processing {img_path.name}  (free {fg:.1f}GB)")
 
         img_pil = Image.open(img_path).convert("RGB")
         img = transform(img_pil).cuda().unsqueeze(0)
@@ -233,6 +296,12 @@ def run_compression(args, all_images):
                 raise
 
         output_pil = transforms.ToPILImage()(out_img[0].clamp(0.0, 1.0))
+
+        # E2a blind refinement (decoded image only — no GT, test-phase legal)
+        if refiner is not None:
+            output_pil = refiner.enhance(
+                output_pil, strength=args.postproc_strength,
+                steps=args.postproc_steps)
 
         if args.color_fix:
             img_orig = (img * 0.5 + 0.5).float().cpu().detach()
@@ -325,6 +394,7 @@ def run_scoring(args, images_to_score):
     ds_model = ds_model.to(dev).eval()
 
     acc = {"psnr": 0.0, "ms_ssim": 0.0, "lpips": 0.0, "dists": 0.0}
+    per_image = {}
     tot_bytes = tot_px = 0
     scored = 0
     n = len(images_to_score)
@@ -361,6 +431,7 @@ def run_scoring(args, images_to_score):
         tot_px += px
         bpp = bbytes * 8 / px if px else 0
         scored += 1
+        per_image[gt_path.stem] = {**sc, "bpp": bpp}
 
         log(f"  [{i:03d}/{n}] {gt_path.name:<14} PSNR {sc['psnr']:6.3f} | MS-SSIM {sc['ms_ssim']:.4f} | "
             f"LPIPS {sc['lpips']:.4f} | DISTS {sc['dists']:.4f} | bpp {bpp:.5f}")
@@ -388,7 +459,8 @@ def run_scoring(args, images_to_score):
     del lp_model, ds_model
     torch.cuda.empty_cache()
 
-    return {"means": means, "final": final, "avg_bpp": avg_bpp, "scored": scored}
+    return {"means": means, "final": final, "avg_bpp": avg_bpp,
+            "scored": scored, "per_image": per_image}
 
 
 # ──────────────── PHASE 3: package submission ZIP ───────────────
@@ -440,7 +512,7 @@ def package_submission(args, all_images, runtime_per_image):
     readme_text = f"""runtime per image [s] : {runtime_per_image:.4f}
 CPU[1] / GPU[0] : 0
 Extra Data [1] / No Extra Data [0] : 1
-Other description: StableCodec (ft24.pkl) with SD-Turbo generative prior, LoRA-adapted VAE/UNet, ELIC auxiliary encoder. Color fix: {args.color_fix}. Average BPP: {avg_bpp:.6f}.
+Other description: StableCodec ({os.path.basename(args.codec_path)}) with SD-Turbo generative prior, LoRA-adapted VAE/UNet, ELIC auxiliary encoder. Color fix: {args.color_fix}. Average BPP: {avg_bpp:.6f}.
 """
     (sub_dir / "readme.txt").write_text(readme_text, encoding="utf-8")
 
@@ -462,6 +534,42 @@ Other description: StableCodec (ft24.pkl) with SD-Turbo generative prior, LoRA-a
     return zip_path
 
 
+# ─────────────────── baseline comparison (experiment) ──────────────────
+def compare_to_baseline(per_image, baseline_path):
+    """Print per-image and mean ΔLPIPS/ΔDISTS/ΔFinal vs a stored baseline JSON."""
+    import json
+    if not Path(baseline_path).is_file():
+        log(f"[baseline] not found: {baseline_path} (skipping comparison)")
+        return
+    base = json.load(open(baseline_path))
+    common = [k for k in per_image if k in base]
+    if not common:
+        log("[baseline] no overlapping image names; skipping comparison")
+        return
+
+    log("\n" + "=" * 70)
+    log(f"  Δ vs BASELINE  ({baseline_path}, {len(common)} imgs)")
+    log("-" * 70)
+
+    def contrib(d):  # the part of Final this image's perception controls
+        return 20.0 * (1 - d["lpips"]) + 25.0 * (1 - d["dists"]) + d["psnr"] + 10.0 * d["ms_ssim"]
+
+    dl = dd = dpart = 0.0
+    for k in sorted(common):
+        n_, b_ = per_image[k], base[k]
+        a, b = n_["lpips"] - b_["lpips"], n_["dists"] - b_["dists"]
+        dpart_i = contrib(n_) - contrib(b_)
+        dl += a; dd += b; dpart += dpart_i
+        flag = "✓" if dpart_i > 0 else ("·" if abs(dpart_i) < 0.05 else "✗")
+        log(f"  {flag} {k}: LPIPS {b_['lpips']:.3f}->{n_['lpips']:.3f} ({a:+.3f}) | "
+            f"DISTS {b_['dists']:.3f}->{n_['dists']:.3f} ({b:+.3f}) | Δpart={dpart_i:+.3f}")
+    m = len(common)
+    log("-" * 70)
+    log(f"  MEAN ΔLPIPS={dl/m:+.4f}  ΔDISTS={dd/m:+.4f}  | "
+        f"mean Δpartial-Final={dpart/m:+.4f}  ({'BETTER' if dpart > 0 else 'WORSE'})")
+    log("=" * 70)
+
+
 # ─────────────────────────── main ───────────────────────────────
 def main():
     args = parse_args()
@@ -471,6 +579,18 @@ def main():
     all_images = sorted(val_dir.glob("*.png"))
     total_count = len(all_images)
     log(f"Found {total_count} validation images in {val_dir}")
+
+    # ── --worst_set: restrict to the 15 perceptually worst baseline images ──
+    if args.worst_set:
+        wanted = set(WORST15)
+        all_images = [p for p in all_images if p.stem in wanted]
+        log(f"[worst_set] restricted to {len(all_images)} of {len(WORST15)} worst images")
+        # worst_set implies "run all of them" unless explicitly bounded
+        if args.n_compress is None:
+            args.n_compress = len(all_images)
+        if args.n_score is None:
+            args.n_score = len(all_images)
+        total_count = len(all_images)
 
     # ── bound n_compress / n_score ──
     if args.n_compress is not None:
@@ -514,12 +634,25 @@ def main():
         log("\nSkipping scoring (--skip_scoring)")
         score_result = None
 
+    # ── baseline comparison (worst_set experiments) ──
+    if score_result and args.worst_set:
+        baseline_path = Path(__file__).resolve().parent / "baselines" / "worst15_ft24.json"
+        compare_to_baseline(score_result["per_image"], baseline_path)
+
     # ── Phase 3: Package submission ──
     if not args.skip_zip:
         log("\n" + "=" * 70)
         log("PHASE 3: Packaging Submission ZIP")
         log("=" * 70)
         zip_path = package_submission(args, images_to_compress, runtime_per_image)
+
+        # Kaggle disk: keep only the zip, drop the loose dirs + staging copy.
+        if args.zip_only:
+            for d in ("reconstructed", "bitstream", "submission"):
+                dp = Path(args.out_dir) / d
+                if dp.exists():
+                    shutil.rmtree(dp)
+            log(f"[zip_only] removed loose dirs; kept {zip_path}")
     else:
         log("\nSkipping ZIP (--skip_zip)")
 
