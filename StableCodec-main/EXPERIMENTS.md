@@ -62,9 +62,54 @@ PSNR 21.12 | MS-SSIM 0.744 | LPIPS 0.244 | DISTS 0.112 | Final 65.88 | avg_bpp 0
 Tested on worst-15, applied to the already-decoded PNGs (zero GPU). **Every**
 variant made **LPIPS and DISTS worse** (best case `sharp×1.5`: dLPIPS +0.007,
 dDISTS +0.005, dFinal −0.54). Adding high-freq detail onto wrong structure
-amplifies the feature-space error. → **Deterministic sharpening / filtering is a
-dead end. Do not pursue.** (Also implies a blind enhancer must be tuned, not
-assumed.)
+amplifies the feature-space error.
+
+### E1 — `ft16` checkpoint (more bits) — ✅ WINS, but over budget alone
+Worst-15, vs ft24 baseline: **every one of the 15 images improved**.
+`ΔLPIPS −0.034, ΔDISTS −0.019, mean Δpartial-Final +2.22`. PSNR also rose
+(18.79→19.35). **But** worst-15 avg_bpp = 0.0110 and full-set ft16 ≈ 0.0086
+> 0.008 → **invalid if used alone.** ⇒ the win is real; the task is to capture
+it **within budget** via per-image rate allocation (§E-RA below).
+
+### E2a — SD-Turbo SDEdit refinement — ❌ REJECTED
+Worst-15, ft24 + `--postproc sdturbo` (strength 0.3). It **OOM'd on the 12 large
+images** (fell back to un-refined, Δ=0) and on the 3 small images it ran it was
+**catastrophic** (0062/0089/0090: LPIPS +0.15…+0.17, DISTS +0.12…+0.17,
+Δpart ≈ −7 to −8). `mean Δpartial-Final −1.53`.
+
+### ⛔ Consequence — blind generative refinement is a DEAD END
+EXP-0 and E2a fail for the same reason: the decoded image is already the codec's
+best estimate of *this* GT; a generative prior resamples a *different plausible*
+image → **farther from the exact GT → worse reference metrics (LPIPS/DISTS).**
+This rejects **E2a, E2b (full StableSR), and E4 (DiffBIR/SUPIR)** — no decoder-side
+generative enhancer is worth pursuing. (Bonus: avoids the StableSR 4 GB problem.)
+
+## 3b. Per-image rate allocation (ensemble) — ✅ ALREADY DONE by team → 66.9
+Encoding at multiple rate points (ft32/ft24/ft16) and allocating the byte budget
+across images was already tried and reached **Final ≈ 66.9** (up from ~65.9).
+**Do not rebuild this.** We need a lever that is different from both rate
+allocation and blind refinement.
+
+## 3c. Remaining test-safe levers that move *toward* GT (next)
+To improve reference metrics we must make the decode closer to *this* GT, not a
+different plausible image. With refinement (away from GT) and ensemble (fixed
+budget reshuffle) exhausted, the open levers are:
+
+- **L1 — Encoder-side latent optimization (RDO in perceptual space).** Highest EV.
+  Freeze the model + rate; the **encoder** runs gradient descent on the latent it
+  transmits to minimize `LPIPS+DISTS(decode(latent), source)`. Same bits, better
+  code → decode closer to GT. Not weight training (model frozen, per-image code
+  only); decoder unchanged; encoder may use the source → **test-phase legal.**
+  ⚠️ Needs user OK on the "no training" boundary (this is encoder RDO, not
+  fine-tuning).
+- **L2 — Decoder tiling tuning** (`--vae_decoder_tiled_size`, `--latent_tiled_size`,
+  `--latent_tiled_overlap`). Free, no OOD risk, **untried.** The failure tail is
+  mostly large (2040×…) tiled images; bigger tiles / more overlap cut seam
+  artifacts. Already supported — sweep on `--worst_set` now.
+- **L3 — Decoder knobs** `--res_scale` (added), multi-step, CFG. Low expectation
+  (OOD), cheap to sweep.
+- **L4 — Encoder-side conditioning** (per-image caption signalled in a few bytes).
+  Low-med.
 
 ## 4. Why the "obvious" decoder knobs are low-confidence (math)
 

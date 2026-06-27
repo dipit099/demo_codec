@@ -17,4 +17,5 @@
 2026-06-25 15:22  submission_AEIC_ME_ft16__cf16gated-vt160.zip  FINAL  63.4595  PSNR 19.5804  MSSSIM 0.6959  LPIPS 0.2702  DISTS 0.1070  bpp 0.007476  n=10  OK
 2026-06-27 14:15  stablecodec_output.zip                    FINAL  63.1260  PSNR 19.4120  MSSSIM 0.7056  LPIPS 0.2680  DISTS 0.1193  bpp 0.008742  n=10  OVER
 
-2026-06-23 14:03  lovif_stablecodec_f24_nocf_submission.zip FINAL  65.8814  PSNR 21.1243  MSSSIM 0.7436  LPIPS 0.2440  DISTS 0.1120  bpp 0.006703  n=100  OK
+2026-06-23 14:03  ft24_stablecodec_submission.zip FINAL  65.8814  PSNR 21.1243  MSSSIM 0.7436  LPIPS 0.2440  DISTS 0.1120  bpp 0.006703  n=100  OK
+ft16_stablecodec_submission                        FINAL 67.5094  PSNR=21.6177  MS-SSIM=0.7760  LPIPS=0.2177  DISTS=0.1006

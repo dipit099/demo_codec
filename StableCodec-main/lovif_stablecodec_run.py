@@ -108,6 +108,9 @@ def parse_args():
     p.add_argument("--latent_tiled_size", type=int, default=96)
     p.add_argument("--latent_tiled_overlap", type=int, default=32)
     p.add_argument("--lambda_rate", type=float, default=0.5)
+    p.add_argument("--res_scale", type=float, default=1.0,
+                   help="Weight on the aux fidelity residual at decode (trained=1.0). "
+                        "Safe inference knob to sweep on worst_set.")
     p.add_argument("--pos_prompt", type=str,
                    default="A high-resolution, 8K, ultra-realistic image with sharp focus, vibrant colors, and natural lighting.")
 
@@ -219,6 +222,7 @@ def run_compression(args, all_images):
         latent_tiled_overlap=args.latent_tiled_overlap,
         lambda_rate=args.lambda_rate,
         pos_prompt=args.pos_prompt,
+        res_scale=args.res_scale,
     )
 
     log("Loading StableCodec model...")
