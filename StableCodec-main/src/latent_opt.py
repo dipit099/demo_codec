@@ -25,7 +25,7 @@ import torch
 @torch.enable_grad()
 def optimize_latent(net, x, pos_caption_enc, lpips_fn, dists_fn, *,
                     iters=40, lr=5e-3, lambda_dists=1.0, lambda_rate=0.0,
-                    target_bpp=None, ori_h=None, ori_w=None, log=print):
+                    target_bpp=None, ori_h=None, ori_w=None, log=print, amp=True):
     """Return an optimized analysis latent `y` (detached) for image `x`.
 
     net             : StableCodec (already .eval(), will be frozen here)
@@ -35,6 +35,9 @@ def optimize_latent(net, x, pos_caption_enc, lpips_fn, dists_fn, *,
     dists_fn        : callable(img_a, img_b) in [0,1]   (DISTS)
     """
     codec = net.codec
+    torch.cuda.empty_cache()
+    amp_ctx = (lambda: torch.autocast("cuda", dtype=torch.float16)) if amp \
+        else (lambda: __import__("contextlib").nullcontext())
 
     # Freeze everything; only `y` will carry gradients.
     for p in net.parameters():
@@ -46,16 +49,6 @@ def optimize_latent(net, x, pos_caption_enc, lpips_fn, dists_fn, *,
         lq_latent = net.vae.encode(x).latent_dist.mode() * net.vae.config.scaling_factor
         y0 = codec.g_a(lq_latent, latent2).detach()
 
-    # Default rate target = the codec's own y0 bitrate, so optimization improves
-    # distortion at (approximately) unchanged bits rather than buying quality
-    # with bits and busting the budget.
-    if lambda_rate > 0 and target_bpp is None:
-        with torch.no_grad():
-            _, r0, _ = codec.forward_from_y(y0, ori_h, ori_w)
-            target_bpp = float(r0.quantized_total_bpp)
-        if log:
-            log(f"    [L1] rate target = y0 bpp = {target_bpp:.5f}")
-
     y = y0.clone().requires_grad_(True)
     opt = torch.optim.Adam([y], lr=lr)
 
@@ -66,23 +59,27 @@ def optimize_latent(net, x, pos_caption_enc, lpips_fn, dists_fn, *,
     for it in range(iters):
         opt.zero_grad(set_to_none=True)
 
-        # Differentiable decode from y (frozen model).
-        x_hat, rate_out, res = codec.forward_from_y(y, ori_h, ori_w)
-        model_pred = net.unet(x_hat, net.timesteps,
-                              encoder_hidden_states=pos_caption_enc).sample
-        x_denoised = net.sched.step(model_pred, net.timesteps,
-                                    x_hat[:, :4], return_dict=True).prev_sample \
-            + net.res_scale * res
-        img = net.vae.decode(x_denoised / net.vae.config.scaling_factor).sample.clamp(-1, 1)
-        img01 = (img * 0.5 + 0.5).clamp(0, 1)
+        with amp_ctx():
+            # Differentiable decode from y (frozen model).
+            x_hat, rate_out, res = codec.forward_from_y(y, ori_h, ori_w)
+            model_pred = net.unet(x_hat, net.timesteps,
+                                  encoder_hidden_states=pos_caption_enc).sample
+            x_denoised = net.sched.step(model_pred, net.timesteps,
+                                        x_hat[:, :4], return_dict=True).prev_sample \
+                + net.res_scale * res
+            img = net.vae.decode(x_denoised / net.vae.config.scaling_factor).sample.clamp(-1, 1)
+            img01 = (img * 0.5 + 0.5).clamp(0, 1).float()
 
-        loss_lpips = lpips_fn(img01 * 2 - 1, x01 * 2 - 1).mean()
-        loss_dists = dists_fn(img01, x01).mean()
-        loss = loss_lpips + lambda_dists * loss_dists
+            loss_lpips = lpips_fn(img01 * 2 - 1, x01 * 2 - 1).mean()
+            loss_dists = dists_fn(img01, x01).mean()
+            loss = loss_lpips + lambda_dists * loss_dists
 
-        bpp = rate_out.quantized_total_bpp
-        if lambda_rate > 0 and target_bpp is not None:
-            loss = loss + lambda_rate * torch.relu(bpp - target_bpp)
+            # Differentiable RDO rate term: rate_out.rate_loss = codec_lambda *
+            # total_bpp (NOT detached), so it actually constrains y's bitrate.
+            # (quantized_total_bpp is detached in the codec → useless for grad.)
+            if lambda_rate > 0:
+                loss = loss + lambda_rate * rate_out.rate_loss
+            bpp = float(rate_out.quantized_total_bpp)  # logging only
 
         loss.backward()
         opt.step()

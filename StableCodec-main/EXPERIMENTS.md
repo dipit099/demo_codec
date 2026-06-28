@@ -3,6 +3,36 @@
 **Goal:** raise the LoViF `Final` score by improving **LPIPS** and **DISTS** only,
 with **no training**, using **inference-only** changes.
 
+## 0. FINDINGS LEDGER (at-a-glance, newest first)
+
+Baseline (ft24, board-faithful, 100 imgs): `PSNR 21.12 | MSSSIM 0.744 | LPIPS 0.244
+| DISTS 0.112 | Final 65.88 | bpp 0.0069`. Best so far: **rate allocation → 66.9**.
+Winner #1: LPIPS 0.069 / DISTS 0.033 / Final 72.19.
+
+| Lever | Verdict | Worst-15 result | Why |
+|-------|---------|-----------------|-----|
+| EXP-0 sharpening (UnsharpMask/Sharpness) | ❌ dead | all variants worse (best −0.54) | adds high-freq onto wrong structure → away from GT |
+| E1 `ft16` (more bits) | ✅ helps, ⚠️ over budget | **every img better, Δ +2.22** | more bits raises the whole curve; but 0.0086 bpp > 0.008 alone |
+| Rate allocation (ft32/24/16 ensemble) | ✅ **DONE → 66.9** | — | already implemented by team; **do not rebuild** |
+| E2a SDEdit refinement | ❌ dead | OOM on big imgs; small imgs Δ≈−7…−8 | generative resample → different plausible image → away from GT |
+| L3 `res_scale` 0.7/1.15/1.3 | ❌ dead | −0.02 / −0.15 / −0.38 | trained α=1 is optimal; OOD |
+| L2 tiling (bigger tiles/overlap) | ❌ dead | −0.09 / −0.11 (DISTS worse) | trained tile sizes optimal; OOD |
+| **L1 encoder-side latent optimization** | 🔨 **built, OOMs on T4** | every optimized img → crash→fallback (Δ=0) | full fp32 backward graph (UNet+VAE+LPIPS+DISTS) > 16 GB even at 768×512. Added fp16-autocast + visible fallback; **re-test pending** |
+
+**Two hard conclusions:**
+1. **The frozen decoder is at its trained optimum.** Five decoder-side perturbations
+   (sharpen, SDEdit, res_scale, two tiling) all hurt. No decode-time tweak helps.
+2. **Only "more bits" helped, and only encoder-side levers remain.** Rate allocation
+   (done, 66.9) and L1 latent-opt (the lever left) are the whole remaining space.
+   Closing the gap to the winners (LPIPS 0.069) almost certainly needs *their trained
+   model* — beyond inference-only scope.
+
+**Open item:** make L1 fit T4 memory (fp16 autocast added; if still OOM, options =
+optimize only small images, gradient-checkpoint the modified UNet properly, or
+latent-space proxy loss). Then measure if it beats 66.9.
+
+---
+
 > ⚠️ **TEST-PHASE FIRST.** Everything we build must be valid for the *final test
 > phase*: it must run from the submitted decoder + checkpoints alone (**≤ 4 GB**,
 > **no ground-truth leak**, no test-time training). Any idea that only helps the
@@ -97,13 +127,24 @@ worse, one OOM). **Five experiments now agree: the frozen decoder is at its
 trained optimum; any decode-time perturbation moves away from GT.** Decoder-side
 is exhausted → only encoder-side (L1) remains.
 
-### L1 — encoder-side latent optimization — 🔨 BUILT, awaiting validation
+### L1 — encoder-side latent optimization — 🔨 BUILT, OOMs on T4 (fix in progress)
 `src/latent_opt.py` + `--latent_opt`. Freezes the model, Adam-optimizes the
 transmitted latent `y` to minimize `LPIPS + λ·DISTS` to the source through the
 frozen differentiable decoder, with a rate penalty pinned to the y0 bitrate.
-`compress_from_y` entropy-codes the result; the decoder is untouched. Pixel cap
-(`--lo_max_pixels`, default 1.2M) skips huge images (full-res backprop OOMs T4);
-gradient checkpointing on. **Validate on small images first.**
+`compress_from_y` entropy-codes the result; the decoder is untouched.
+
+**First runs (iters 40 & 80, lr 5e-3/1e-2):** every image L1 actually optimized
+came back `MISSING rec`; every image that *scored* was a plain-compress fallback
+(Δ=0). Diagnosis: the optimize path was **OOMing** (StableCodec loads SD-Turbo in
+**fp32** ≈5–6 GB; a full backward graph through UNet+VAE+LPIPS+DISTS exceeds the
+T4's 16 GB even at 768×512), and the blanket OOM handler silently `continue`d,
+dropping the image.
+
+**Fixes applied:** (a) per-image L1 now logs the real exception and **falls back
+to plain compress** (never drops an image); (b) **fp16 autocast** around the decode
+to roughly halve activation memory. **Re-test pending.** If still OOM: optimize
+only small images, properly gradient-checkpoint the LoRA-modified UNet, or use a
+latent-space proxy loss.
 
 ## 3c. Remaining test-safe levers that move *toward* GT (next)
 To improve reference metrics we must make the decode closer to *this* GT, not a

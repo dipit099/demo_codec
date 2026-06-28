@@ -320,14 +320,21 @@ def run_compression(args, all_images):
         try:
             if use_lo:
                 from latent_opt import optimize_latent
-                y_opt = optimize_latent(
-                    net, img_padded, net.pos_caption_enc, lo_lpips, lo_dists,
-                    iters=args.lo_iters, lr=args.lo_lr,
-                    lambda_dists=args.lo_lambda_dists,
-                    lambda_rate=args.lo_lambda_rate,
-                    ori_h=img_padded.shape[2], ori_w=img_padded.shape[3], log=log)
-                with torch.no_grad():
-                    output_dict = net.codec.compress_from_y(y_opt)
+                try:
+                    y_opt = optimize_latent(
+                        net, img_padded, net.pos_caption_enc, lo_lpips, lo_dists,
+                        iters=args.lo_iters, lr=args.lo_lr,
+                        lambda_dists=args.lo_lambda_dists,
+                        lambda_rate=args.lo_lambda_rate,
+                        ori_h=img_padded.shape[2], ori_w=img_padded.shape[3], log=log)
+                    with torch.no_grad():
+                        output_dict = net.codec.compress_from_y(y_opt)
+                except Exception as e:  # never drop an image; reveal the real cause
+                    log(f"  [L1] FAILED on {img_path.name}: {type(e).__name__}: {e}"
+                        f"  -> falling back to plain compress")
+                    torch.cuda.empty_cache()
+                    with torch.no_grad():
+                        output_dict = net.compress(img_padded)
             else:
                 with torch.no_grad():
                     output_dict = net.compress(img_padded)
