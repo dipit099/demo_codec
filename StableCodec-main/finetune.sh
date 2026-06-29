@@ -8,4 +8,4 @@ accelerate launch --num_processes=2 --gpu_ids="0,1," --main_process_port 29300 s
     --test_dataset="<PATH_TO_DATASET>/Kodak/" \
     --output_dir="<PATH_TO_SAVE_OUTPUTS>/" \
     --max_train_steps 21000 \
-    --lambda_rate 2 # [2, 3, 4, 6, 8, 12, 16, 24, 32]
+    --lambda_rate 20 # [2, 3, 4, 6, 8, 12, 16, 24, 32]

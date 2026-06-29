@@ -17,9 +17,6 @@ class StableCodec(torch.nn.Module):
 
         self.latent_tiled_size = args.latent_tiled_size
         self.latent_tiled_overlap = args.latent_tiled_overlap
-        # res_scale: weight on the aux fidelity residual added after the 1-step
-        # denoise (trained value = 1.0). Exposed for inference-time sweeps.
-        self.res_scale = getattr(args, "res_scale", 1.0)
 
         print("[SD-Turbo]: Building SD-Turbo ......")
         self.tokenizer = AutoTokenizer.from_pretrained(sd_path, subfolder="tokenizer")
@@ -248,13 +245,13 @@ class StableCodec(torch.nn.Module):
             noise_pred /= contributors
             model_pred = noise_pred
 
-        x_denoised = self.sched.step(model_pred, self.timesteps, lq_latent_hat[:, :4], return_dict=True).prev_sample + self.res_scale * res
+        x_denoised = self.sched.step(model_pred, self.timesteps, lq_latent_hat[:, :4], return_dict=True).prev_sample + res
 
         # Decoder
         output_image = (self.vae.decode(x_denoised / self.vae.config.scaling_factor).sample).clamp(-1, 1)
 
         return output_image
-
+    
     def save_model(self, outf):
         sd = {}
         sd["state_dict_vae"] = {k: v for k, v in self.vae.state_dict().items() if "lora" in k}

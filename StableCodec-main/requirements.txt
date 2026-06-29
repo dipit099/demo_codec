@@ -28,3 +28,4 @@ diffusers==0.25.1
 gradio==3.43.1
 huggingface_hub==0.25.0
 neuralcompression
+

@@ -313,13 +313,8 @@ class LatentCodec(CompressionModel):
         return latent_hat
 
     def forward(self, latent, latent2, ori_h, ori_w):
-        y = self.g_a(latent, latent2)
-        return self.forward_from_y(y, ori_h, ori_w)
 
-    def forward_from_y(self, y, ori_h, ori_w):
-        # Differentiable decode + rate from a given analysis latent y.
-        # Used by encoder-side latent optimization (L1); identical math to
-        # forward() after g_a, so the entropy-coded result is consistent.
+        y = self.g_a(latent, latent2)
         z = self.h_a(y)
 
         _, z_likelihoods = self.entropy_bottleneck(z)
@@ -396,13 +391,8 @@ class LatentCodec(CompressionModel):
         return x_hat, RateLossOutput, res
 
     def compress(self, latent, latent2):
-        y = self.g_a(latent, latent2)
-        return self.compress_from_y(y)
 
-    def compress_from_y(self, y):
-        # Entropy-code a given analysis latent y (post-L1-optimization). The
-        # decoder is unchanged, so it reconstructs the same y_hat the optimizer
-        # targeted.
+        y = self.g_a(latent, latent2)
         z = self.h_a(y)
 
         torch.backends.cudnn.deterministic = True

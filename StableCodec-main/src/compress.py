@@ -31,7 +31,7 @@ def compress_one_image(net, bin_path, ori_h, ori_w, img_name, x):
         output_dict = net.compress(x)
     shape = output_dict["shape"]
     if not os.path.exists(bin_path): os.makedirs(bin_path)
-    output = os.path.join(bin_path, img_name + ".bin")
+    output = os.path.join(bin_path, img_name)
     with Path(output).open("wb") as f:
         write_body(f, shape, output_dict["strings"])
     size = filesize(output)
@@ -40,7 +40,7 @@ def compress_one_image(net, bin_path, ori_h, ori_w, img_name, x):
 
 
 def decompress_one_image(net, bin_path, ori_h, ori_w, img_name, prompt):
-    output = os.path.join(bin_path, img_name + ".bin")
+    output = os.path.join(bin_path, img_name)
     with Path(output).open("rb") as f:
         strings, shape = read_body(f)
     with torch.no_grad():
