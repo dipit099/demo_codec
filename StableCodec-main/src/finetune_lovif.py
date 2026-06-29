@@ -32,7 +32,8 @@
 #        --lambda_rate 24 --output_dir /kaggle/working/sc_ft24
 # =============================================================================
 
-import os, gc, csv, sys, time, json, types, argparse
+import os, gc, csv, sys, time, json, types, argparse, subprocess
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # reduce T4 fragmentation (must precede torch CUDA init)
 import numpy as np
 import torch
 from pathlib import Path
@@ -125,7 +126,7 @@ def parse_args():
     # training
     p.add_argument("--output_dir", required=True)
     p.add_argument("--seed", type=int, default=123)
-    p.add_argument("--train_patch_size", type=int, default=512)
+    p.add_argument("--train_patch_size", type=int, default=384)   # T4-safe (512 OOMs the full SC pipeline); drop to 256 if needed
     p.add_argument("--train_batch_size", type=int, default=1)
     p.add_argument("--max_train_steps", type=int, default=21000)
     p.add_argument("--gradient_accumulation_steps", type=int, default=8)
@@ -140,6 +141,9 @@ def parse_args():
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
     p.add_argument("--enable_xformers", action="store_true", default=False)
+    p.add_argument("--no_multi_gpu", action="store_true",
+                   help="force single GPU. DEFAULT: auto-use ALL visible GPUs (DDP) by "
+                        "re-launching under `accelerate launch --multi_gpu`.")
     # io
     p.add_argument("--checkpointing_steps", type=int, default=2000)
     p.add_argument("--resume_steps", type=int, default=1000)
@@ -299,8 +303,7 @@ def lr_for_step(step, base):
 # --------------------------------------------------------------------------
 #  main
 # --------------------------------------------------------------------------
-def main():
-    args = parse_args()
+def main(args):
     if args.sd_path is None:
         from huggingface_hub import snapshot_download
         args.sd_path = snapshot_download(repo_id="stabilityai/sd-turbo")
@@ -465,4 +468,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    _args = parse_args()
+    # ---- AUTO DUAL-GPU: a plain `!python finetune_lovif.py ...` will re-launch itself on
+    #      ALL visible GPUs via `accelerate launch --multi_gpu` (real DDP, both T4s).
+    #      The _SC_RELAUNCHED guard stops infinite recursion (the spawned procs skip this). ----
+    _ngpu = torch.cuda.device_count()
+    if (not _args.no_multi_gpu) and os.environ.get("_SC_RELAUNCHED") != "1" and _ngpu > 1:
+        os.environ["_SC_RELAUNCHED"] = "1"
+        _cmd = ["accelerate", "launch", "--multi_gpu", f"--num_processes={_ngpu}",
+                f"--mixed_precision={_args.mixed_precision}", os.path.abspath(__file__)] + sys.argv[1:]
+        print(f"[multi-gpu] {_ngpu} GPUs detected -> re-launching via: {' '.join(_cmd)}", flush=True)
+        raise SystemExit(subprocess.call(_cmd, env=os.environ))
+    main(_args)
