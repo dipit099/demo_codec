@@ -101,7 +101,7 @@ def parse_args():
     p.add_argument("--train_dirs", nargs="+", required=True, help="one or more PNG folders to train on")
     p.add_argument("--val_dir", required=True, help="folder to validate on (first --val_num imgs)")
     p.add_argument("--val_num", type=int, default=25)
-    p.add_argument("--val_patch", type=int, default=512, help="center-crop for eval (T4-safe; mult of 64)")
+    p.add_argument("--val_patch", type=int, default=256, help="center-crop for eval (multiple of 256, T4-safe)")
     # bitrate
     p.add_argument("--lambda_rate", type=float, default=24.0, help="bpp knob (=compression ratio; 24 -> ~0.008)")
     # ---- NEW metric-aligned loss weights (mirror score 25:20:10:1) ----
@@ -126,7 +126,9 @@ def parse_args():
     # training
     p.add_argument("--output_dir", required=True)
     p.add_argument("--seed", type=int, default=123)
-    p.add_argument("--train_patch_size", type=int, default=384)   # T4-safe (512 OOMs the full SC pipeline); drop to 256 if needed
+    p.add_argument("--train_patch_size", type=int, default=256)   # MUST be a multiple of 256
+                   # (codec y=patch/64 must be divisible by 4: 256->y4 ok, 384->y6 BREAKS, 512->y8 ok).
+                   # 256 is valid AND fits the T4 (512 OOMs).
     p.add_argument("--train_batch_size", type=int, default=1)
     p.add_argument("--max_train_steps", type=int, default=21000)
     p.add_argument("--gradient_accumulation_steps", type=int, default=8)
@@ -183,7 +185,7 @@ class PngFolders(Dataset):
 def load_val_crops(val_dir, n, patch, device):
     exts = (".png", ".jpg", ".jpeg")
     paths = sorted([p for p in Path(val_dir).rglob("*") if p.suffix.lower() in exts])[:n]
-    P = max(64, (patch // 64) * 64)
+    P = max(256, (patch // 256) * 256)   # codec needs y=P/64 divisible by 4 -> P multiple of 256
     crops = []
     for p in paths:
         im = Image.open(p).convert("RGB"); W, H = im.size
@@ -307,7 +309,11 @@ def main(args):
     if args.sd_path is None:
         from huggingface_hub import snapshot_download
         args.sd_path = snapshot_download(repo_id="stabilityai/sd-turbo")
-    args.val_patch = max(64, (args.val_patch // 64) * 64)
+    # codec requires patch a multiple of 256 (y=patch/64 must be divisible by 4)
+    if args.train_patch_size % 256 != 0:
+        args.train_patch_size = max(256, (args.train_patch_size // 256) * 256)
+        print(f"[fix] train_patch_size -> {args.train_patch_size} (must be multiple of 256)", flush=True)
+    args.val_patch = max(256, (args.val_patch // 256) * 256)
 
     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps,
                               mixed_precision=args.mixed_precision)
