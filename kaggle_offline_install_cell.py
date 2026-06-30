@@ -4,30 +4,31 @@ import subprocess
 import sys
 
 # =========================================================================
-# Offline install for StableCodec/finetune_lovif.py using the
-# ahnaftahmid24/lovif-aeic-offline Kaggle dataset's prebuilt wheels.
-# No PyPI access required (--no-index --find-links).
+# Offline install for StableCodec/finetune_lovif.py using YOUR self-exported
+# tonyironman099/dpt099-stablecodec-wheels Kaggle dataset (built via
+# kaggle_export_wheels_cell.py).
 #
-# Dropped vs. the original snippet (neither is imported anywhere in
-# finetune_lovif.py's call chain -- StableCodec.py / latent_codec.py /
-# my_utils/training_utils.py / vision_aided_loss -- verified by grep):
-#   - gdown            (not present in the dataset; only needed for manually
-#                        fetching elic_official.pth / stablecodec_*.pkl from
-#                        Drive, which you already have via
-#                        mehedi052/stablecodec-checkpoints)
-#   - open-clip-torch  (not present in the dataset; CLIPLoss uses HF
-#                        transformers.CLIPVisionModelWithProjection, not
-#                        open_clip)
+# Still using --no-deps: the export's `pip download` resolved a torch
+# dependency chain transitively and pulled in CUDA-13 runtime wheels
+# (nvidia_cublas, nvidia_cudnn_cu13, triton-3.7.1, cuda_toolkit, etc) even
+# though the EXCLUDE filter correctly kept the actual torch/torchvision/numpy
+# wheels OUT. Without --no-deps, a plain `pip install` could still try to
+# upgrade those standalone CUDA library packages to versions that don't match
+# Kaggle's pre-installed torch build, risking a broken GPU runtime. --no-deps
+# installs only the 11 leaf packages below and leaves Kaggle's existing
+# torch/CUDA stack untouched -- every transitive need (numpy, pillow,
+# requests, tqdm, pyyaml, etc.) is already present on Kaggle's base image.
 #
-# Versions: installed as whatever the dataset's wheels/ folder has, NOT
-# the exact pins from the original snippet (accelerate 1.14.0 vs 1.9.0,
-# timm 1.0.27 vs 1.0.22, compressai 1.2.8 vs 1.2.6) -- per your call to
-# use the dataset's versions as-is.
+# Exact package list matches your original snippet (nothing renamed/dropped
+# here -- gdown and open-clip-torch ARE included since your export grabbed
+# them; they're simply unused by finetune_lovif.py's import chain, so their
+# presence is harmless).
 # =========================================================================
 
-WHEELS_DIR = "/kaggle/input/datasets/ahnaftahmid24/lovif-aeic-offline/results (3)/wheels"
+WHEELS_DIR = "/kaggle/input/datasets/tonyironman099/dpt099-stablecodec-wheels/wheels"
 
 packages = [
+    "gdown",
     "huggingface_hub",
     "diffusers",
     "transformers",
@@ -37,8 +38,11 @@ packages = [
     "einops",
     "timm",
     "compressai",
+    "open-clip-torch",
     "lpips",
     "DISTS_pytorch",
+    "pytorch_msssim",
+    "matplotlib",
 ]
 
 
