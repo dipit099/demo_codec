@@ -25,7 +25,7 @@ import sys
 # use the dataset's versions as-is.
 # =========================================================================
 
-WHEELS_DIR = "/kaggle/input/datasets/ahnaftahmid24/lovif-aeic-offline/results (3)/wheels"
+WHEELS_DIR = "/kaggle/input/lovif-aeic-offline/results (3)/wheels"
 
 packages = [
     "huggingface_hub",
@@ -52,7 +52,7 @@ def run(cmd, check=True):
 
 run([
     sys.executable, "-m", "pip", "install", "-q",
-    "--no-index", "--find-links", WHEELS_DIR,
+    "--no-index", "--find-links", WHEELS_DIR, "--no-deps",
     *packages,
 ])
 
