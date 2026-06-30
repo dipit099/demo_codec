@@ -25,9 +25,9 @@
 #  ahnaftahmid24/lovif-aeic-offline + mehedi052/stablecodec-checkpoints datasets:
 #    accelerate launch --multi_gpu --num_processes=2 --mixed_precision=bf16 \
 #        src/finetune_lovif.py \
-#        --sd_path /kaggle/input/lovif-aeic-offline/results/lovif_aeic_offline/sd-turbo \
-#        --elic_path /kaggle/input/stablecodec-checkpoints/elic_official.pth \
-#        --codec_path /kaggle/input/stablecodec-checkpoints/stablecodec_base.pkl \
+#        --sd_path /kaggle/input/datasets/ahnaftahmid24/lovif-aeic-offline/results/lovif_aeic_offline/sd-turbo \
+#        --elic_path /kaggle/input/datasets/mehedi052/stablecodec-checkpoints/elic_official.pth \
+#        --codec_path /kaggle/input/datasets/mehedi052/stablecodec-checkpoints/stablecodec_base.pkl \
 #        --train_dirs /kaggle/input/.../dataset_train /kaggle/input/.../dataset_val \
 #        --val_dir   /kaggle/input/.../dataset_val \
 #        --lambda_rate 24 --output_dir /kaggle/working/sc_ft24
@@ -57,7 +57,7 @@ def _bootstrap_offline_caches():
     we symlink-merge both `hub/checkpoints/*` and `hub/<repo>` entries into a single
     writable cache under /kaggle/working instead of picking one and losing the other.
     """
-    base = "/kaggle/input/lovif-aeic-offline"
+    base = "/kaggle/input/datasets/ahnaftahmid24/lovif-aeic-offline"
     if not os.path.isdir(base):
         return
     os.environ.setdefault("HF_HUB_OFFLINE", "1")

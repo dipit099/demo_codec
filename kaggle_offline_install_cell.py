@@ -25,7 +25,7 @@ import sys
 # use the dataset's versions as-is.
 # =========================================================================
 
-WHEELS_DIR = "/kaggle/input/lovif-aeic-offline/results (3)/wheels"
+WHEELS_DIR = "/kaggle/input/datasets/ahnaftahmid24/lovif-aeic-offline/results (3)/wheels"
 
 packages = [
     "huggingface_hub",
