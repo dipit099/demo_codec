@@ -1,3 +1,4 @@
+import os
 import h5py
 import torch
 import argparse
@@ -92,9 +93,13 @@ class H5Dataset(Dataset):
 
 class CLIPLoss(torch.nn.Module):
 
-    def __init__(self, clip_model_name = "openai/clip-vit-base-patch32"):
+    def __init__(self, clip_model_name = None):
         super().__init__()
-        
+
+        # LOVIF_CLIP_PATH is set by finetune_lovif.py's offline bootstrap when the
+        # ahnaftahmid24/lovif-aeic-offline Kaggle dataset is attached, pointing at a
+        # local snapshot of openai/clip-vit-base-patch32 (avoids a live HF download).
+        clip_model_name = clip_model_name or os.environ.get("LOVIF_CLIP_PATH", "openai/clip-vit-base-patch32")
         self.image_encoder = CLIPVisionModelWithProjection.from_pretrained(clip_model_name).eval()
         self.image_encoder.requires_grad_(False)
 

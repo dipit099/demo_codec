@@ -21,19 +21,73 @@
 #  OPTIMISTIC (train-set metrics, not held-out). The true check is the hidden test set.
 #  This is intentional per the run spec (use all data); just read the eval as a trend.
 #
-#  RUN (Kaggle, from repo root, dual T4):
+#  RUN (Kaggle, from repo root, dual T4), fully offline via the
+#  ahnaftahmid24/lovif-aeic-offline + mehedi052/stablecodec-checkpoints datasets:
 #    accelerate launch --multi_gpu --num_processes=2 --mixed_precision=bf16 \
 #        src/finetune_lovif.py \
-#        --sd_path /kaggle/input/.../sd-turbo \
+#        --sd_path /kaggle/input/datasets/ahnaftahmid24/lovif-aeic-offline/results/lovif_aeic_offline/sd-turbo \
 #        --elic_path /kaggle/input/datasets/mehedi052/stablecodec-checkpoints/elic_official.pth \
 #        --codec_path /kaggle/input/datasets/mehedi052/stablecodec-checkpoints/stablecodec_base.pkl \
 #        --train_dirs /kaggle/input/.../dataset_train /kaggle/input/.../dataset_val \
 #        --val_dir   /kaggle/input/.../dataset_val \
 #        --lambda_rate 24 --output_dir /kaggle/working/sc_ft24
+#
+#  Offline asset coverage (see notebooks/offline-data-context-kaggle.txt for the full
+#  dataset file listing):
+#    - sd-turbo                     -> results/lovif_aeic_offline/sd-turbo/  (--sd_path)
+#    - openai/clip-vit-base-patch32 -> train-assets/lovif_train_assets/clip-vit-base-patch32/
+#    - dinov2 vitb14 (GAN disc)     -> train-assets/_hub_cache (torch.hub layout)
+#    - lpips vgg16/alexnet backbone -> results (2)/torch_hub (torch.hub layout)
+#  All of the above are picked up automatically via HF_HOME/TORCH_HOME below once the
+#  dataset is attached to the notebook -- no internet access needed at runtime.
 # =============================================================================
 
 import os, gc, csv, sys, time, json, types, argparse, subprocess
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # reduce T4 fragmentation (must precede torch CUDA init)
+
+
+def _bootstrap_offline_caches():
+    """Point HF/torch hub caches at the pre-downloaded ahnaftahmid24/lovif-aeic-offline
+    Kaggle dataset (if present) so nothing falls back to a live internet download.
+    Must run before transformers/diffusers/torch.hub/lpips/torchvision are imported.
+
+    The dataset ships TWO separate torch.hub caches (results (2)/torch_hub has the
+    lpips vgg16/alexnet checkpoints; train-assets/_hub_cache has dinov2_vitb14 + the
+    facebookresearch/dinov2 repo snapshot) -- torch.hub only reads one TORCH_HOME, so
+    we symlink-merge both `hub/checkpoints/*` and `hub/<repo>` entries into a single
+    writable cache under /kaggle/working instead of picking one and losing the other.
+    """
+    base = "/kaggle/input/datasets/ahnaftahmid24/lovif-aeic-offline"
+    if not os.path.isdir(base):
+        return
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+    torch_home = "/kaggle/working/_torch_hub_cache"
+    ckpt_dir = os.path.join(torch_home, "hub", "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    for src_root in (f"{base}/results (2)/torch_hub/hub", f"{base}/train-assets/_hub_cache/hub"):
+        if not os.path.isdir(src_root):
+            continue
+        for name in os.listdir(src_root):
+            src = os.path.join(src_root, name)
+            if name == "checkpoints" and os.path.isdir(src):
+                for fname in os.listdir(src):
+                    dst = os.path.join(ckpt_dir, fname)
+                    if not os.path.exists(dst):
+                        os.symlink(os.path.join(src, fname), dst)
+            else:
+                dst = os.path.join(torch_home, "hub", name)
+                if not os.path.exists(dst):
+                    os.symlink(src, dst)
+    os.environ.setdefault("TORCH_HOME", torch_home)
+
+    clip_local = f"{base}/train-assets/lovif_train_assets/clip-vit-base-patch32"
+    if os.path.isdir(clip_local):
+        os.environ.setdefault("LOVIF_CLIP_PATH", clip_local)
+
+
+_bootstrap_offline_caches()  # MUST precede transformers/diffusers/torch imports
 import numpy as np
 import torch
 from pathlib import Path
@@ -101,7 +155,7 @@ def parse_args():
     p.add_argument("--train_dirs", nargs="+", required=True, help="one or more PNG folders to train on")
     p.add_argument("--val_dir", required=True, help="folder to validate on (first --val_num imgs)")
     p.add_argument("--val_num", type=int, default=25)
-    p.add_argument("--val_patch", type=int, default=256, help="center-crop for eval (multiple of 256, T4-safe)")
+    p.add_argument("--val_patch", type=int, default=384, help="center-crop for eval (multiple of 256, T4-safe)")
     # bitrate
     p.add_argument("--lambda_rate", type=float, default=24.0, help="bpp knob (=compression ratio; 24 -> ~0.008)")
     # ---- NEW metric-aligned loss weights (mirror score 25:20:10:1) ----
@@ -126,7 +180,7 @@ def parse_args():
     # training
     p.add_argument("--output_dir", required=True)
     p.add_argument("--seed", type=int, default=123)
-    p.add_argument("--train_patch_size", type=int, default=256)   # MUST be a multiple of 256
+    p.add_argument("--train_patch_size", type=int, default=386)   # MUST be a multiple of 256
                    # (codec y=patch/64 must be divisible by 4: 256->y4 ok, 384->y6 BREAKS, 512->y8 ok).
                    # 256 is valid AND fits the T4 (512 OOMs).
     p.add_argument("--train_batch_size", type=int, default=1)
@@ -147,7 +201,8 @@ def parse_args():
                    help="force single GPU. DEFAULT: auto-use ALL visible GPUs (DDP) by "
                         "re-launching under `accelerate launch --multi_gpu`.")
     # io
-    p.add_argument("--checkpointing_steps", type=int, default=2000)
+    p.add_argument("--checkpointing_steps", type=int, default=500)
+    p.add_argument("--keep_last", type=int, default=3, help="keep only the N most-recent step checkpoints (best.pkl kept separately)")
     p.add_argument("--resume_steps", type=int, default=1000)
     p.add_argument("--eval_freq", type=int, default=500)
     p.add_argument("--plot_freq", type=int, default=500)
@@ -294,6 +349,18 @@ def plot_reports(out_dir):
         log(f"  [plot] {e}")
 
 
+def prune_checkpoints(ckpt_dir, lam, keep_last):
+    """Keep only the `keep_last` most-recent step checkpoints; never touch best.pkl/final."""
+    cks = []
+    for p in Path(ckpt_dir).glob(f"stablecodec_ft{int(lam)}_*.pkl"):
+        s = p.stem.split("_")[-1]
+        if s.isdigit(): cks.append((int(s), p))
+    cks.sort()
+    for _, p in cks[:-keep_last] if keep_last > 0 else cks:
+        try: p.unlink()
+        except Exception: pass
+
+
 def lr_for_step(step, base):
     # StableCodec schedule shape (scaled): 5e-5 -> 2e-5 (5k) -> 1e-5 (10k) -> 1e-6 (15k)
     if step >= 15000: return base * 0.02
@@ -398,7 +465,7 @@ def main(args):
     log(f"=== finetune ft{int(args.lambda_rate)} | steps={args.max_train_steps} "
         f"eff_batch={accelerator.num_processes*args.train_batch_size*args.gradient_accumulation_steps} "
         f"prec={args.mixed_precision} GAN={'on' if net_disc is not None else 'off'} ===")
-    t0 = time.time(); logs = {}; done = False
+    t0 = time.time(); logs = {}; done = False; best_score = -1e9
     while not done:
         for batch in train_dl:
             lr = lr_for_step(global_step, args.lr)
@@ -456,14 +523,22 @@ def main(args):
                     accelerator.save_state(str(rdir)); sfile.write_text(json.dumps({"global_step": global_step}))
                 if accelerator.is_main_process and global_step % args.eval_freq == 0:
                     r = run_eval(accelerator.unwrap_model(net), metrics, crops, out_dir, global_step, args.save_num)
-                    if r: log(f"  [eval @ {global_step}] bpp={r['bpp']:.5f} PSNR={r['psnr']:.3f} "
-                              f"MS-SSIM={r['msssim']:.4f} LPIPS={r['lpips']:.4f} DISTS={r['dists']:.4f} "
-                              f">>> SCORE={r['score']:.3f}")
+                    if r:
+                        log(f"  [eval @ {global_step}] bpp={r['bpp']:.5f} PSNR={r['psnr']:.3f} "
+                            f"MS-SSIM={r['msssim']:.4f} LPIPS={r['lpips']:.4f} DISTS={r['dists']:.4f} "
+                            f">>> SCORE={r['score']:.3f}")
+                        if r["score"] > best_score:   # keep the single BEST checkpoint (by crop-eval score)
+                            best_score = r["score"]
+                            bestf = out_dir/"checkpoints"/f"stablecodec_ft{int(args.lambda_rate)}_best.pkl"
+                            accelerator.unwrap_model(net).save_model(str(bestf))
+                            log(f"  ** new best (score={best_score:.3f}) -> {bestf.name}")
                 if accelerator.is_main_process and global_step % args.plot_freq == 0:
                     plot_reports(out_dir)
                 if accelerator.is_main_process and global_step % args.checkpointing_steps == 0:
                     outf = out_dir/"checkpoints"/f"stablecodec_ft{int(args.lambda_rate)}_{global_step}.pkl"
-                    accelerator.unwrap_model(net).save_model(str(outf)); log(f"  saved {outf}")
+                    accelerator.unwrap_model(net).save_model(str(outf))
+                    prune_checkpoints(out_dir/"checkpoints", args.lambda_rate, args.keep_last)  # keep only last N + best
+                    log(f"  saved {outf.name} (kept last {args.keep_last} + best)")
                 if global_step >= args.max_train_steps:
                     done = True; break
 
